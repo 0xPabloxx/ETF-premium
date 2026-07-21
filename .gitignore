@@ -1,0 +1,4 @@
+notify.json
+state.json
+__pycache__/
+*.log

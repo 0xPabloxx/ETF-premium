@@ -1,0 +1,17 @@
+{
+  "alert_low": 3.0,
+  "alert_high": 10.0,
+  "channels": {
+    "macos": true,
+    "pushplus_token": "",
+    "serverchan_sendkey": "",
+    "wecom_webhook": "",
+    "email": {
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 465,
+      "user": "",
+      "app_password": "",
+      "to": ""
+    }
+  }
+}
