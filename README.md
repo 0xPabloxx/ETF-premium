@@ -1,62 +1,70 @@
-# 场内基金溢价监控（skill 包）
+# ETF Premium Monitor · 场内基金溢价监控
 
-监控纳斯达克100 / 标普500 场内基金（QDII ETF）相对基金净值的溢价率，低溢价（买入机会）/ 高溢价（风险）自动推送微信、邮件、macOS 通知。数据来自新浪财经，纯 Python 标准库，无依赖。
+Monitor the premium of China-listed NASDAQ-100 / S&P 500 QDII ETFs over their NAV, with automatic alerts (WeChat / Email / macOS) when the premium falls back (buy opportunity) or spikes (risk). Pure Python stdlib, zero dependencies. Also works as a [Claude Code skill](https://code.claude.com/docs/en/skills).
 
-本目录同时是 Claude Code 的用户级 skill（`~/.claude/skills/etf-premium/`），在任何会话里问「溢价怎么样」即可触发。
+监控 A 股场内纳斯达克100 / 标普500 QDII ETF 相对基金净值的溢价率，溢价回落（买入机会）或冲高（风险）时自动推送微信 / 邮件 / macOS 通知。纯 Python 标准库，零依赖，可兼作 Claude Code skill。
 
-## 安装
-
-```bash
-git clone https://github.com/<owner>/etf-premium-monitor.git ~/.claude/skills/etf-premium
-cd ~/.claude/skills/etf-premium && ./install.sh
+```
+== 纳斯达克100 ==
+代码         名称          现价     涨跌    净值(T-1)   净值日期      溢价率
+sh513100   纳指ETF国泰    2.130  +1.62%    1.9381   2026-07-20   +9.90%
+sz159941   纳指ETF       1.589  +2.45%    1.4522   2026-07-20   +9.42%
 ```
 
-`install.sh` 会生成 `notify.json`（编辑它填入微信/邮件凭证）并注册 launchd 定时预警；非 macOS 会给出等价的 crontab。不用 Claude Code 也可以，clone 到任意目录直接跑 `monitor.py`，skill 只是可选的会话入口。
+## How it works · 原理
 
-## 原理
+- Realtime price / 场内实时价：`hq.sinajs.cn/list=sh513100`
+- Fund NAV (T-1) / 基金净值：`hq.sinajs.cn/list=f_513100`
+- Daily K-line / 日K线：`CN_MarketData.getKLineData`
+- **Premium 溢价率 = price / NAV(T-1) − 1** — same formula as the exchanges' official premium-risk announcements · 与交易所溢价风险提示公告同口径
 
-- 场内实时价：`https://hq.sinajs.cn/list=sh513100`（需 `Referer: finance.sina.com.cn`，GBK）
-- 基金净值：同接口 `f_` 前缀（`list=f_513100`），返回 T-1 单位净值和日期
-- 日K线：`CN_MarketData.getKLineData?symbol=sh513100&scale=240&datalen=N`
-- **溢价率 = 场内现价 / T-1 单位净值 − 1**，与交易所溢价风险提示公告口径一致
-
-## 用法
+## Install · 安装
 
 ```bash
-python3 monitor.py                    # 一次性溢价表
-python3 monitor.py --watch 60         # 终端常驻刷新
-python3 monitor.py --json             # JSON 输出
-python3 monitor.py check              # 定时任务入口：交易时段内查阈值并推送
-python3 monitor.py check --force      # 强制检查（忽略时段/当日去重）
-python3 monitor.py test-notify        # 测试所有已配置通知渠道
+# As a Claude Code skill (optional) · 作为 Claude Code skill（可选）
+git clone https://github.com/0xPabloxx/ETF-premium.git ~/.claude/skills/etf-premium
+cd ~/.claude/skills/etf-premium && ./install.sh
+
+# Or standalone, any directory · 或独立使用，clone 到任意目录即可
+```
+
+`install.sh` creates your private `notify.json` and registers a launchd job (macOS) that checks every 10 minutes during A-share trading hours; on Linux it prints an equivalent crontab line.
+
+`install.sh` 会生成私人配置 `notify.json` 并注册 launchd 定时任务（macOS，A 股交易时段内每 10 分钟检查一次）；Linux 会输出等价的 crontab。
+
+## Usage · 用法
+
+```bash
+python3 monitor.py                    # premium table · 一次性溢价表
+python3 monitor.py --watch 60         # live refresh · 终端常驻刷新
+python3 monitor.py --json             # machine-readable · JSON 输出
+python3 monitor.py check              # cron entry: check thresholds & push · 定时任务入口
+python3 monitor.py test-notify        # test notification channels · 测试通知渠道
 python3 monitor.py history sh513100 --days 20
 ```
 
-## 自动预警
+Watchlist lives in `funds.json` (codes with sh/sz prefix). 监控标的在 `funds.json` 配置（代码带 sh/sz 前缀）。
 
-launchd 定时任务 `com.etf-premium`（由 `install.sh` 注册）每 10 分钟跑一次 `check`：
+## Alerts · 预警配置（notify.json）
 
-- 脚本自带 A 股交易时段判断（9:25–11:35 / 12:55–15:10，Asia/Shanghai），盘外直接跳过
-- 同一基金同一条件（低/高溢价）**每天只提醒一次**，不刷屏
-- 日志：`~/Library/Logs/etf-premium.log`
-- 卸载：`launchctl unload ~/Library/LaunchAgents/com.etf-premium.plist`
+Thresholds · 阈值：`alert_low` — notify when premium ≤ this (buy opportunity, default 3%) · 溢价回落买入提醒；`alert_high` — notify when ≥ this (risk, default 10%) · 高溢价风险提醒。Each fund+condition alerts at most once per day. 同一基金同一条件每天最多提醒一次。
 
-## 通知渠道配置（notify.json）
-
-| 渠道 | 填什么 | 说明 |
+| Channel 渠道 | Setup 配置 | Notes 说明 |
 |---|---|---|
-| `macos` | true/false | 本机通知，默认开 |
-| `pushplus_token` | [pushplus.plus](https://www.pushplus.plus/) 微信扫码登录后复制 token | **推荐**，免费 200 条/天，消息进微信公众号 |
-| `wecom_webhook` | 企业微信建群 → 添加群机器人 → 复制 webhook 地址 | 完全免费，消息在企业微信 |
-| `serverchan_sendkey` | [sct.ftqq.com](https://sct.ftqq.com/) 的 SendKey | 免费版仅 5 条/天且只显示标题，不推荐 |
-| `email` | Gmail 地址 + [应用专用密码](https://myaccount.google.com/apppasswords)（需开两步验证） | `user`/`app_password` 填发信账号，`to` 已填你的邮箱 |
+| `macos` | on by default · 默认开启 | Local notification · 本机通知 |
+| `pushplus_token` | token from [pushplus.plus](https://www.pushplus.plus/) | **Recommended · 推荐**，free 200 msg/day to WeChat · 免费 200 条/天直达微信 |
+| `wecom_webhook` | WeCom group bot webhook · 企业微信群机器人 | Free & unlimited · 免费不限量 |
+| `serverchan_sendkey` | SendKey from [sct.ftqq.com](https://sct.ftqq.com/) | Free tier only 5/day · 免费版仅 5 条/天 |
+| `email` | Gmail + [app password](https://myaccount.google.com/apppasswords) | Any SMTP works · 任意 SMTP 均可 |
 
-填好后跑 `python3 monitor.py test-notify` 验证。
+Verify with · 填好后验证：`python3 monitor.py test-notify`
 
-阈值：`alert_low`（溢价 ≤ 此值提醒买入机会，默认 3%）、`alert_high`（≥ 此值提醒风险，默认 10%）。
+## Caveats · 已知局限
 
-## 已知局限 / TODO
+- NAV is T-1: on days after a big overnight US move, this premium metric is systematically biased — cross-check with NASDAQ futures. A true realtime premium needs IOPV (NAV × index futures × FX), planned.
+- 净值是 T-1 的：美股隔夜大涨/大跌次日该口径会系统性偏差，需结合纳指期货判断。实时口径需要 IOPV（净值 × 指数期货 × 汇率），待接入。
+- Sina endpoints require a `Referer` header and return GBK — already handled. 新浪接口需 Referer 头、GBK 编码，脚本已处理。
 
-- 净值是 T-1 的：美股隔夜大涨/大跌当天该口径会系统性偏差，需结合纳指期货判断。
-  更准的实时溢价需要 IOPV（T-1 净值 × 指数期货实时涨跌 × 汇率），待接入。
-- 历史溢价曲线需要净值历史序列，新浪 `f_` 只给最新一期，待找净值历史接口。
+## Disclaimer · 免责声明
+
+For information only, not investment advice. 仅供参考，不构成投资建议。
