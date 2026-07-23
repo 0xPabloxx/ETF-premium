@@ -2,3 +2,5 @@ notify.json
 state.json
 __pycache__/
 *.log
+premium_log.csv
+premium_chart.html

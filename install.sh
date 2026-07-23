@@ -30,7 +30,7 @@ if [ "$(uname)" = "Darwin" ]; then
         <string>check</string>
     </array>
     <key>StartInterval</key>
-    <integer>600</integer>
+    <integer>300</integer>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>

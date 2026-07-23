@@ -22,6 +22,9 @@ description: >
 - **查询当前溢价**：运行 `python3 $DIR/monitor.py --json`，解读时说明：哪只溢价最高/最低、
   是否高溢价（>5% 提示申购套利砸盘风险）、口径是相对 T-1 净值（非实时 IOPV）。
 - **查历史走势**：`python3 $DIR/monitor.py history <code> --days N`
+- **溢价曲线**：定时任务每 5 分钟把采样写入 `$DIR/premium_log.csv`；
+  `python3 $DIR/monitor.py plot` 生成 `$DIR/premium_chart.html`（用 `open` 打开给用户看）；
+  数据有缺口时先跑 `python3 $DIR/monitor.py backfill` 用当天 5 分钟K线补齐。
 - **修改阈值/通知渠道**：编辑 `$DIR/notify.json`（`alert_low` 溢价回落买入提醒、
   `alert_high` 高溢价风险提醒）；改完用 `python3 $DIR/monitor.py test-notify` 验证渠道。
 - **增删标的**：编辑 `$DIR/funds.json`。

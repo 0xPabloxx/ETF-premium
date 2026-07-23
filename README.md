@@ -41,7 +41,11 @@ python3 monitor.py --json             # machine-readable · JSON 输出
 python3 monitor.py check              # cron entry: check thresholds & push · 定时任务入口
 python3 monitor.py test-notify        # test notification channels · 测试通知渠道
 python3 monitor.py history sh513100 --days 20
+python3 monitor.py backfill           # backfill today's curve from 5-min bars · 用5分钟K线回填当天数据
+python3 monitor.py plot               # premium curve HTML from logged data · 生成溢价曲线网页
 ```
+
+The cron `check` also appends every sample to `premium_log.csv`; `plot` turns the log into a self-contained interactive HTML chart (light/dark, hover crosshair, per-fund table). `check` 定时任务会把每次采样写入 `premium_log.csv`，`plot` 据此生成自包含的交互式溢价曲线网页（明暗自适应、悬停十字线、数据表）。
 
 Watchlist lives in `funds.json` (codes with sh/sz prefix). 监控标的在 `funds.json` 配置（代码带 sh/sz 前缀）。
 
