@@ -31,6 +31,11 @@ description: >
 - **修改阈值/通知渠道**：编辑 `$DIR/notify.json`（`alert_low` 溢价回落买入提醒、
   `alert_high` 高溢价风险提醒）；改完用 `python3 $DIR/monitor.py test-notify` 验证渠道。
 - **增删标的**：编辑 `$DIR/funds.json`。
+- **买哪只（相对低估信号）**：用户在同指数几只里选择加仓对象时，
+  跑 `python3 $DIR/monitor.py pick`（备选池在 notify.json 的 `pick`，默认为用户实际买的
+  4 只纳指：159659/159696/159501/513100）。score = 自身偏离 + 相对同组价差偏离，
+  最负的一只 = 相对被低估。score ≤ -1 视为明显买入窗口；定时任务也会自动推「🎯 相对低估」通知
+  （阈值 `pick_alert_score`）。解读时强调这是相对信号，不代表绝对便宜。
 - **自动预警**：launchd 定时任务 `com.etf-premium`（`$DIR/install.sh` 注册）每 10 分钟跑
   `monitor.py check`（脚本自带交易时段判断 + 当日去重）。
   排查：日志在 `~/Library/Logs/etf-premium.log`；重装直接重跑 `install.sh`。

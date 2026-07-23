@@ -306,6 +306,21 @@ def cmd_check(args) -> None:
             f"价 {r['price']:.3f} / 净值 {r['nav']:.4f}({r['nav_date']})"
         )
 
+    # 同指数相对低估信号（pick）
+    if cfg.get("pick"):
+        try:
+            best = compute_pick(cfg["pick"])[0]
+            key = f"{today}|{best['code']}|pick"
+            if best["score"] <= cfg.get("pick_alert_score", -1.0) and \
+                    (args.force or not state.get(key)):
+                state[key] = f"{now:%T}"
+                hits.append(
+                    f"🎯 相对低估(买入窗口) {best['name']} {best['code'][2:]}  "
+                    f"综合分 {best['score']:+.2f}  溢价 {best['premium_pct']:+.2f}%"
+                )
+        except Exception as e:
+            print(f"pick 信号计算失败: {e}", file=sys.stderr)
+
     if not hits:
         desc = f"全局 ≤{cfg.get('alert_low', 3.0)}% 或 ≥{cfg.get('alert_high', 10.0)}%"
         if overrides:
@@ -488,8 +503,17 @@ def fetch_nav_history(code6: str, n: int = 400) -> dict:
     """天天基金历史净值：{日期: 单位净值}，按日期升序。接口每页最多 20 条，需翻页。"""
     navs = {}
     for page in range(1, n // 20 + 2):
-        raw = json.loads(http_get(NAV_HIST_URL.format(code=code6, page=page),
-                                  encoding="utf-8", referer="https://fundf10.eastmoney.com/"))
+        if page > 1:
+            time.sleep(0.3)  # 限速，避免被东财限流
+        for attempt in range(3):
+            try:
+                raw = json.loads(http_get(NAV_HIST_URL.format(code=code6, page=page),
+                                          encoding="utf-8", referer="https://fundf10.eastmoney.com/"))
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(2 * (attempt + 1))
         items = (raw.get("Data") or {}).get("LSJZList") or []
         if not items:
             break
@@ -600,6 +624,84 @@ def cmd_export(args) -> None:
     print(f"已导出 {len(rows)} 条 -> {out}")
 
 
+# ---------------------------------------------------------------- pick（同指数内选相对低估）
+
+PICK_CACHE = BASE / "pick_cache.json"
+
+
+def get_pick_hist(codes: list, days: int) -> dict:
+    """近 N 日各基金的日线溢价序列 {code: {日期: 溢价}}，按天缓存避免反复抓历史净值。"""
+    import bisect
+    cache = load_json(PICK_CACHE, {})
+    today = f"{datetime.now(TZ):%F}"
+    if cache.get("date") == today and set(cache.get("hist", {})) >= set(codes):
+        return cache["hist"]
+    hist = {}
+    for code in codes:
+        bars = json.loads(http_get(
+            KLINE_URL.format(symbol=code, scale=240, datalen=days + 10), encoding="utf-8"))
+        navs = fetch_nav_history(code[2:], days + 40)
+        nav_dates = list(navs)
+        series = {}
+        for bar in bars:
+            day = bar["day"][:10]
+            if day >= today:
+                continue  # 当天用实时价单独算，不进基线
+            i = bisect.bisect_left(nav_dates, day)
+            if i:
+                series[day] = round((float(bar["close"]) / navs[nav_dates[i - 1]] - 1) * 100, 4)
+        hist[code] = series
+    PICK_CACHE.write_text(json.dumps({"date": today, "hist": hist}, ensure_ascii=False),
+                          encoding="utf-8")
+    return hist
+
+
+def compute_pick(codes: list, days: int = 20) -> list:
+    """返回按综合分升序（最被低估在前）的列表。
+    score = 自身偏离(当前溢价-自身N日均值) + 价差偏离(当前相对同组价差-历史常态价差)。"""
+    live = {r["code"]: r for r in fetch_all(codes) if "error" not in r}
+    codes = [c for c in codes if c in live]
+    if len(codes) < 2:
+        sys.exit("可用标的不足 2 只，无法比较")
+    hist = get_pick_hist(codes, days)
+    common = sorted(set.intersection(*(set(hist[c]) for c in codes)))[-days:]
+    if len(common) < 5:
+        sys.exit("共同历史交易日不足 5 天")
+
+    results = []
+    for code in codes:
+        cur = live[code]["premium_pct"]
+        own = [hist[code][d] for d in common]
+        own_dev = cur - sum(own) / len(own)
+        others = [c for c in codes if c != code]
+        spread_now = cur - sum(live[c]["premium_pct"] for c in others) / len(others)
+        spreads = [hist[code][d] - sum(hist[c][d] for c in others) / len(others) for d in common]
+        spread_dev = spread_now - sum(spreads) / len(spreads)
+        results.append({
+            "code": code, "name": live[code]["name"], "price": live[code]["price"],
+            "premium_pct": round(cur, 2), "own_dev": round(own_dev, 2),
+            "spread_dev": round(spread_dev, 2), "score": round(own_dev + spread_dev, 2),
+        })
+    return sorted(results, key=lambda r: r["score"])
+
+
+def cmd_pick(args) -> None:
+    cfg = load_json(NOTIFY_FILE, {})
+    codes = args.codes or cfg.get("pick") or []
+    if not codes:
+        sys.exit("请在 notify.json 的 pick 里配置备选代码，或作为参数传入")
+    results = compute_pick(codes, args.days)
+    print(f"同指数相对估值（近 {args.days} 日基线，分数越负越被低估）：\n")
+    print(f"{'代码':10} {'名称':10} {'现价':>7} {'溢价':>7} {'自身偏离':>8} {'价差偏离':>8} {'综合分':>7}")
+    for r in results:
+        print(f"{r['code']:10} {r['name'][:5]:6} {r['price']:>7.3f} {r['premium_pct']:>+6.2f}% "
+              f"{r['own_dev']:>+7.2f}% {r['spread_dev']:>+7.2f}% {r['score']:>+6.2f}")
+    best = results[0]
+    verdict = "明显相对低估，是买入窗口" if best["score"] <= -1.0 else \
+              "轻度相对低估" if best["score"] <= -0.3 else "无明显异常（各只都在常态价差附近）"
+    print(f"\n=> 当前相对最便宜：{best['name']} {best['code'][2:]}（综合分 {best['score']:+.2f}，{verdict}）")
+
+
 # ---------------------------------------------------------------- 表格 / watch
 
 def load_watchlist() -> dict:
@@ -668,6 +770,9 @@ def main() -> None:
     plot.add_argument("--out", help="输出 HTML 路径（默认 premium_chart.html）")
     exp = sub.add_parser("export", help="导出数据库为 CSV")
     exp.add_argument("--out", default=str(BASE / "premium_export.csv"))
+    pick = sub.add_parser("pick", help="同指数内找相对低估的一只（买哪只信号）")
+    pick.add_argument("codes", nargs="*", help="备选代码，默认取 notify.json 的 pick")
+    pick.add_argument("--days", type=int, default=20, help="基线回看交易日数")
     hist = sub.add_parser("history", help="查看日K历史")
     hist.add_argument("code", help="如 sh513100")
     hist.add_argument("--days", type=int, default=20)
@@ -685,6 +790,8 @@ def main() -> None:
         cmd_plot_fund(args) if args.code else cmd_plot(args)
     elif args.cmd == "export":
         cmd_export(args)
+    elif args.cmd == "pick":
+        cmd_pick(args)
     elif args.watch:
         while True:
             print("\033[2J\033[H", end="")
