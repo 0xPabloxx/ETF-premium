@@ -127,6 +127,16 @@ def notify_macos(title: str, message: str) -> None:
         subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
+def notify_macos_alert(title: str, message: str) -> None:
+    """模态弹窗：专注/勿扰模式也会显示，30 秒后自动消失。"""
+    if sys.platform == "darwin":
+        script = f'display alert "{title}" message "{message}" giving up after 30'
+        # 不等待用户点击，弹出后脚本继续
+        subprocess.Popen(["osascript", "-e", script],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+
+
 def notify_pushplus(token: str, title: str, message: str) -> None:
     http_post("https://www.pushplus.plus/send",
               {"token": token, "title": title, "content": message.replace("\n", "<br>")})
@@ -158,6 +168,8 @@ def send_all(cfg: dict, title: str, message: str) -> list:
     tasks = []
     if ch.get("macos"):
         tasks.append(("macos", lambda: notify_macos(title, message)))
+    if ch.get("macos_alert"):
+        tasks.append(("macos_alert", lambda: notify_macos_alert(title, message)))
     if ch.get("pushplus_token"):
         tasks.append(("pushplus", lambda: notify_pushplus(ch["pushplus_token"], title, message)))
     if ch.get("serverchan_sendkey"):

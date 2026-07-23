@@ -4,6 +4,7 @@
   "group_overrides": {},
   "channels": {
     "macos": true,
+    "macos_alert": false,
     "pushplus_token": "",
     "serverchan_sendkey": "",
     "wecom_webhook": "",
