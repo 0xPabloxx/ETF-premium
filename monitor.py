@@ -123,7 +123,7 @@ def fetch_all(codes: list) -> list:
 
 def notify_macos(title: str, message: str) -> None:
     if sys.platform == "darwin":
-        script = f'display notification "{message}" with title "{title}"'
+        script = f'display notification "{message}" with title "{title}" sound name "Glass"'
         subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
