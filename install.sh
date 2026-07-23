@@ -16,6 +16,11 @@ fi
 
 if [ "$(uname)" = "Darwin" ]; then
   mkdir -p "$HOME/Library/LaunchAgents"
+  # 用日历式触发（每 5 分钟整点），StartInterval 会被部分机器的节能调度无限推迟
+  CAL=""
+  for m in 0 5 10 15 20 25 30 35 40 45 50 55; do
+    CAL="$CAL<dict><key>Minute</key><integer>$m</integer></dict>"
+  done
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -29,8 +34,10 @@ if [ "$(uname)" = "Darwin" ]; then
         <string>$DIR/monitor.py</string>
         <string>check</string>
     </array>
-    <key>StartInterval</key>
-    <integer>300</integer>
+    <key>StartCalendarInterval</key>
+    <array>$CAL</array>
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
