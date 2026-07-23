@@ -2,6 +2,9 @@
   "alert_low": 3.0,
   "alert_high": 10.0,
   "group_overrides": {},
+  "pick": [],
+  "pick_alert_score": -1.0,
+  "dynamic_low": { "window": 10, "buffer": 0.15, "monthly_fallback_day": 26 },
   "channels": {
     "macos": true,
     "macos_alert": false,

@@ -321,6 +321,46 @@ def cmd_check(args) -> None:
         except Exception as e:
             print(f"pick 信号计算失败: {e}", file=sys.stderr)
 
+    # 动态低点：任一备选基金溢价创近 N 日新低（月度定投的择时信号）
+    dyn = cfg.get("dynamic_low")
+    if dyn and cfg.get("pick"):
+        try:
+            window = dyn.get("window", 10)
+            buffer = dyn.get("buffer", 0.15)
+            rows_by_code = {r["code"]: r for r in rows}
+            hist = get_pick_hist(cfg["pick"], max(window, 20))
+            month = today[:7]
+            for code in cfg["pick"]:
+                r = rows_by_code.get(code)
+                series = sorted(hist.get(code, {}).items())[-window:]
+                if not r or len(series) < window // 2:
+                    continue
+                floor_val = min(v for _, v in series)
+                cur = r["premium_pct"]
+                key = f"{today}|{code}|dyn"
+                if cur <= floor_val + buffer and (args.force or not state.get(key)):
+                    state[key] = f"{now:%T}"
+                    hits.append(
+                        f"📉 近{window}日低点(买入) {r['name']} {code[2:]}  "
+                        f"溢价 {cur:+.2f}%（前低 {floor_val:+.2f}%）"
+                    )
+            # 月末兜底：26 号起若本月还没触发过低点信号，提醒一次当前最优
+            fb_day = dyn.get("monthly_fallback_day", 26)
+            fb_key = f"{month}-fallback"
+            dyn_fired_this_month = any(
+                k.startswith(month) and k.endswith("|dyn") for k in state)
+            if now.day >= fb_day and not dyn_fired_this_month and \
+                    (args.force or not state.get(fb_key)):
+                state[fb_key] = f"{today} {now:%T}"
+                best = compute_pick(cfg["pick"])[0]
+                hits.append(
+                    f"📅 月度兜底：本月尚未出现低点信号，当前相对最优 "
+                    f"{best['name']} {best['code'][2:]}（溢价 {best['premium_pct']:+.2f}%，"
+                    f"综合分 {best['score']:+.2f}）"
+                )
+        except Exception as e:
+            print(f"动态低点计算失败: {e}", file=sys.stderr)
+
     if not hits:
         desc = f"全局 ≤{cfg.get('alert_low', 3.0)}% 或 ≥{cfg.get('alert_high', 10.0)}%"
         if overrides:
@@ -330,8 +370,8 @@ def cmd_check(args) -> None:
         print(f"[{now:%F %T}] 无触发（{desc}）")
         return
 
-    # 只保留今天的去重状态，避免文件无限增长
-    state = {k: v for k, v in state.items() if k.startswith(today)}
+    # 只保留本月的去重状态（月度兜底需要跨天记忆），避免文件无限增长
+    state = {k: v for k, v in state.items() if k.startswith(today[:7])}
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
     title = f"ETF溢价提醒 {len(hits)}条"
