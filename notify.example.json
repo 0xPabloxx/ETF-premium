@@ -1,6 +1,7 @@
 {
   "alert_low": 3.0,
   "alert_high": 10.0,
+  "group_overrides": {},
   "channels": {
     "macos": true,
     "pushplus_token": "",

@@ -263,10 +263,14 @@ def cmd_check(args) -> None:
         print(f"[{now:%F %T}] 非交易时段，跳过")
         return
 
-    low = cfg.get("alert_low", 3.0)
-    high = cfg.get("alert_high", 10.0)
     groups = load_watchlist()
     codes = [c for lst in groups.values() for c in lst]
+    group_of = {c: g for g, lst in groups.items() for c in lst}
+    overrides = cfg.get("group_overrides", {})
+
+    def threshold(code, key, default):
+        return overrides.get(group_of.get(code), {}).get(key, cfg.get(key, default))
+
     rows = [r for r in fetch_all(codes) if "error" not in r]
     record_rows(rows)  # 顺带落盘，供 plot 画溢价曲线
 
@@ -275,6 +279,8 @@ def cmd_check(args) -> None:
     hits = []
     for r in rows:
         p = r["premium_pct"]
+        low = threshold(r["code"], "alert_low", 3.0)
+        high = threshold(r["code"], "alert_high", 10.0)
         cond = "low" if p <= low else "high" if p >= high else None
         if not cond:
             continue
@@ -289,7 +295,12 @@ def cmd_check(args) -> None:
         )
 
     if not hits:
-        print(f"[{now:%F %T}] 无触发（阈值: ≤{low}% 或 ≥{high}%）")
+        desc = f"全局 ≤{cfg.get('alert_low', 3.0)}% 或 ≥{cfg.get('alert_high', 10.0)}%"
+        if overrides:
+            desc += "；" + "，".join(
+                f"{g} " + "/".join(f"{k.replace('alert_', '')}={v}%" for k, v in o.items())
+                for g, o in overrides.items())
+        print(f"[{now:%F %T}] 无触发（{desc}）")
         return
 
     # 只保留今天的去重状态，避免文件无限增长
@@ -514,9 +525,10 @@ def cmd_plot_fund(args) -> None:
     html = CHART_TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False)) \
                          .replace("__GENERATED__",
                                   f"{datetime.now(TZ):%F %H:%M} · {args.range} · 日线收盘/T-1净值")
-    CHART_FILE.write_text(html, encoding="utf-8")
+    out = Path(args.out) if args.out else CHART_FILE
+    out.write_text(html, encoding="utf-8")
     lo = min(p[1] for p in points); hi = max(p[1] for p in points)
-    print(f"已生成 {CHART_FILE}（{title}，{args.range}，{len(points)} 个交易日，"
+    print(f"已生成 {out}（{title}，{args.range}，{len(points)} 个交易日，"
           f"溢价区间 {lo:+.2f}% ~ {hi:+.2f}%，最新 {points[-1][1]:+.2f}%）")
 
 
@@ -558,9 +570,10 @@ def cmd_plot(args) -> None:
     payload = {"groups": groups}
     html = CHART_TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False)) \
                          .replace("__GENERATED__", f"{datetime.now(TZ):%F %H:%M} · 范围 {args.range} · {reso}")
-    CHART_FILE.write_text(html, encoding="utf-8")
+    out = Path(args.out) if args.out else CHART_FILE
+    out.write_text(html, encoding="utf-8")
     total = sum(len(s["points"]) for g in groups for s in g["series"])
-    print(f"已生成 {CHART_FILE}（{args.range} / {reso}，{total} 个数据点，覆盖 {day_count} 个交易日）")
+    print(f"已生成 {out}（{args.range} / {reso}，{total} 个数据点，覆盖 {day_count} 个交易日）")
 
 
 def cmd_export(args) -> None:
@@ -640,6 +653,7 @@ def main() -> None:
     plot.add_argument("--range", choices=list(RANGE_DAYS), default="all",
                       help="时间范围（默认 all）")
     plot.add_argument("--code", help="单基金历史曲线（如 513500，用K线+历史净值，可回溯半年+）")
+    plot.add_argument("--out", help="输出 HTML 路径（默认 premium_chart.html）")
     exp = sub.add_parser("export", help="导出数据库为 CSV")
     exp.add_argument("--out", default=str(BASE / "premium_export.csv"))
     hist = sub.add_parser("history", help="查看日K历史")
