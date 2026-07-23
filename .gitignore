@@ -8,3 +8,4 @@ premium.db
 premium_export.csv
 *.imported
 pick_cache.json
+LOCAL.md
