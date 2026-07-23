@@ -40,9 +40,13 @@ if [ "$(uname)" = "Darwin" ]; then
 </dict>
 </plist>
 EOF
+  UID_N="$(id -u)"
+  # 现代方式注册（老式 load 在新版 macOS 上定时器可能不生效），失败再退回 load
+  launchctl bootout "gui/$UID_N/$LABEL" 2>/dev/null || true
   launchctl unload "$PLIST" 2>/dev/null || true
-  launchctl load "$PLIST"
-  echo "launchd 定时任务 ${LABEL} 已加载（每 10 分钟检查，日志 ${LOG}）"
+  launchctl bootstrap "gui/$UID_N" "$PLIST" 2>/dev/null || launchctl load "$PLIST"
+  launchctl kickstart "gui/$UID_N/$LABEL" 2>/dev/null || true
+  echo "launchd 定时任务 ${LABEL} 已加载（每 5 分钟检查，日志 ${LOG}）"
   echo "卸载：launchctl unload ${PLIST} && rm ${PLIST}"
 else
   echo "非 macOS：请自行添加 crontab，例如："
