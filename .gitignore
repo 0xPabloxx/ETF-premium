@@ -4,3 +4,6 @@ __pycache__/
 *.log
 premium_log.csv
 premium_chart.html
+premium.db
+premium_export.csv
+*.imported

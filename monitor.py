@@ -23,12 +23,13 @@
 import argparse
 import json
 import smtplib
+import sqlite3
 import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.header import Header
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -47,14 +48,16 @@ HEADERS = {
 FUNDS_FILE = BASE / "funds.json"
 NOTIFY_FILE = BASE / "notify.json"
 STATE_FILE = BASE / "state.json"
-CSV_FILE = BASE / "premium_log.csv"
+DB_FILE = BASE / "premium.db"
+LEGACY_CSV = BASE / "premium_log.csv"
 CHART_FILE = BASE / "premium_chart.html"
 CSV_HEADER = "time,code,name,price,nav,nav_date,premium_pct"
 TZ = ZoneInfo("Asia/Shanghai")
 
 
-def http_get(url: str, encoding: str = "gbk") -> str:
-    req = urllib.request.Request(url, headers=HEADERS)
+def http_get(url: str, encoding: str = "gbk", referer: str = None) -> str:
+    headers = dict(HEADERS, Referer=referer) if referer else HEADERS
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return resp.read().decode(encoding, errors="replace")
 
@@ -175,33 +178,39 @@ def send_all(cfg: dict, title: str, message: str) -> list:
 
 # ---------------------------------------------------------------- 数据落盘
 
-def record_rows(rows: list) -> int:
-    """把快照追加到 premium_log.csv，按 (时间,代码) 去重，返回新增行数。"""
-    existing = set()
-    if CSV_FILE.exists():
-        for line in CSV_FILE.read_text(encoding="utf-8").splitlines()[1:]:
-            parts = line.split(",")
-            if len(parts) >= 2:
-                existing.add((parts[0], parts[1]))
-    else:
-        CSV_FILE.write_text(CSV_HEADER + "\n", encoding="utf-8")
+def get_db() -> sqlite3.Connection:
+    """打开数据库（月/季/年长期存储）；首次运行自动导入旧 CSV。"""
+    fresh = not DB_FILE.exists()
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("""CREATE TABLE IF NOT EXISTS samples(
+        time TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+        price REAL, nav REAL, nav_date TEXT, premium_pct REAL,
+        PRIMARY KEY (time, code))""")
+    if fresh and LEGACY_CSV.exists():
+        rows = []
+        for line in LEGACY_CSV.read_text(encoding="utf-8").splitlines()[1:]:
+            p = line.split(",")
+            if len(p) >= 7:
+                rows.append((p[0], p[1], p[2], float(p[3]), float(p[4]), p[5], float(p[6])))
+        conn.executemany("INSERT OR IGNORE INTO samples VALUES (?,?,?,?,?,?,?)", rows)
+        conn.commit()
+        LEGACY_CSV.rename(LEGACY_CSV.with_suffix(".csv.imported"))
+        print(f"已把旧 CSV 的 {len(rows)} 条记录导入 {DB_FILE.name}")
+    return conn
 
-    added = []
-    for r in rows:
-        if "error" in r:
-            continue
-        key = (r["quote_time"], r["code"])
-        if key in existing:
-            continue
-        existing.add(key)
-        added.append(
-            f"{r['quote_time']},{r['code']},{r['name']},{r['price']},"
-            f"{r['nav']},{r['nav_date']},{r['premium_pct']:.4f}"
-        )
-    if added:
-        with CSV_FILE.open("a", encoding="utf-8") as f:
-            f.write("\n".join(added) + "\n")
-    return len(added)
+
+def record_rows(rows: list) -> int:
+    """把快照写入 SQLite，主键 (时间,代码) 自动去重，返回新增行数。"""
+    conn = get_db()
+    data = [(r["quote_time"], r["code"], r["name"], r["price"],
+             r["nav"], r["nav_date"], round(r["premium_pct"], 4))
+            for r in rows if "error" not in r]
+    before = conn.total_changes
+    conn.executemany("INSERT OR IGNORE INTO samples VALUES (?,?,?,?,?,?,?)", data)
+    conn.commit()
+    added = conn.total_changes - before
+    conn.close()
+    return added
 
 
 def cmd_backfill() -> None:
@@ -235,7 +244,7 @@ def cmd_backfill() -> None:
                 "premium_pct": (close / info["nav"] - 1) * 100,
             })
     n = record_rows(rows)
-    print(f"回填 {today}：新增 {n} 条记录 -> {CSV_FILE}")
+    print(f"回填 {today}：新增 {n} 条记录 -> {DB_FILE}")
 
 
 # ---------------------------------------------------------------- check（定时任务入口）
@@ -362,12 +371,14 @@ const short = t => t.slice(5, 16);
 function build(group, gi) {
   const card = document.createElement("div"); card.className = "card";
   card.innerHTML = `<h2>${group.name}</h2>`;
-  const legend = document.createElement("div"); legend.className = "legend";
-  group.series.forEach((s, i) => {
-    legend.insertAdjacentHTML("beforeend",
-      `<span><i class="chip" style="background:var(${COLORS[i]})"></i>${s.name} ${s.code.slice(2)}</span>`);
-  });
-  card.appendChild(legend);
+  if (group.series.length > 1) {  // 单序列不放图例，标题即标识
+    const legend = document.createElement("div"); legend.className = "legend";
+    group.series.forEach((s, i) => {
+      legend.insertAdjacentHTML("beforeend",
+        `<span><i class="chip" style="background:var(${COLORS[i]})"></i>${s.name} ${s.code.slice(2)}</span>`);
+    });
+    card.appendChild(legend);
+  }
   const plot = document.createElement("div"); plot.className = "plot";
   card.appendChild(plot);
 
@@ -446,18 +457,91 @@ DATA.groups.forEach(build);
 """
 
 
-def cmd_plot() -> None:
-    if not CSV_FILE.exists():
-        sys.exit("还没有数据：先跑 `monitor.py backfill` 或等定时任务积累 premium_log.csv")
-    by_code = {}
-    names = {}
-    for line in CSV_FILE.read_text(encoding="utf-8").splitlines()[1:]:
-        p = line.split(",")
-        if len(p) < 7:
+RANGE_DAYS = {"1d": 1, "5d": 5, "7d": 7, "1m": 31, "3m": 92, "6m": 183, "1y": 366, "all": 36500}
+NAV_HIST_URL = "https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex={page}&pageSize=20"
+
+
+def fetch_nav_history(code6: str, n: int = 400) -> dict:
+    """天天基金历史净值：{日期: 单位净值}，按日期升序。接口每页最多 20 条，需翻页。"""
+    navs = {}
+    for page in range(1, n // 20 + 2):
+        raw = json.loads(http_get(NAV_HIST_URL.format(code=code6, page=page),
+                                  encoding="utf-8", referer="https://fundf10.eastmoney.com/"))
+        items = (raw.get("Data") or {}).get("LSJZList") or []
+        if not items:
+            break
+        for item in items:
+            if item.get("DWJZ"):
+                navs[item["FSRQ"]] = float(item["DWJZ"])
+        if len(navs) >= n:
+            break
+    return dict(sorted(navs.items()))
+
+
+def cmd_plot_fund(args) -> None:
+    """单基金历史溢价曲线：日K收盘 / 最近一期已公布净值（与实时口径一致）。"""
+    code = args.code.lower()
+    if not code.startswith(("sh", "sz")):
+        code = ("sh" if code.startswith("5") else "sz") + code
+    days = RANGE_DAYS[args.range]
+    datalen = min(max(int(days * 0.72) + 5, 8), 300)
+
+    info = {r["code"]: r for r in fetch_all([code])}.get(code)
+    if not info or "error" in info:
+        sys.exit(f"{code} 行情获取失败")
+    bars = json.loads(http_get(KLINE_URL.format(symbol=code, scale=240, datalen=datalen),
+                               encoding="utf-8"))
+    navs = fetch_nav_history(code[2:], datalen + 30)
+    if not navs:
+        sys.exit(f"{code} 历史净值获取失败")
+    nav_dates = list(navs.keys())
+
+    import bisect
+    points = []
+    for bar in bars:
+        day = bar["day"][:10]
+        i = bisect.bisect_left(nav_dates, day)  # 最近一个早于 day 的净值（T-1 口径）
+        if i == 0:
             continue
-        t, code, name, prem = p[0], p[1], p[2], float(p[6])
-        by_code.setdefault(code, {})[t] = prem  # 同一时间戳取最后一条
+        nav = navs[nav_dates[i - 1]]
+        points.append([day, round((float(bar["close"]) / nav - 1) * 100, 4)])
+    if not points:
+        sys.exit("K线与净值日期没有交集")
+
+    title = f"{info['name']} {code[2:]}"
+    payload = {"groups": [{"name": title, "series": [
+        {"code": code, "name": info["name"], "points": points}]}]}
+    html = CHART_TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False)) \
+                         .replace("__GENERATED__",
+                                  f"{datetime.now(TZ):%F %H:%M} · {args.range} · 日线收盘/T-1净值")
+    CHART_FILE.write_text(html, encoding="utf-8")
+    lo = min(p[1] for p in points); hi = max(p[1] for p in points)
+    print(f"已生成 {CHART_FILE}（{title}，{args.range}，{len(points)} 个交易日，"
+          f"溢价区间 {lo:+.2f}% ~ {hi:+.2f}%，最新 {points[-1][1]:+.2f}%）")
+
+
+def cmd_plot(args) -> None:
+    if not DB_FILE.exists() and not LEGACY_CSV.exists():
+        sys.exit("还没有数据：先跑 `monitor.py backfill` 或等定时任务积累 premium.db")
+    conn = get_db()
+    days = RANGE_DAYS[args.range]
+    since = (datetime.now(TZ) - timedelta(days=days)).strftime("%F")
+    rows = conn.execute(
+        "SELECT time, code, name, premium_pct FROM samples WHERE time >= ? ORDER BY time",
+        (since,)).fetchall()
+    conn.close()
+    if not rows:
+        sys.exit(f"范围 {args.range} 内没有数据")
+
+    # 分辨率：跨度 ≤8 个交易日用原始采样（分钟级），更长自动降为日线（每日最后一次采样）
+    day_count = len({t[:10] for t, *_ in rows})
+    daily = day_count > 8
+    by_code, names = {}, {}
+    for t, code, name, prem in rows:
+        key = t[:10] if daily else t
+        by_code.setdefault(code, {})[key] = prem  # 同 key 取时间最晚的一条
         names[code] = name
+
     groups = []
     for gname, codes in load_watchlist().items():
         series = []
@@ -468,13 +552,27 @@ def cmd_plot() -> None:
         if series:
             groups.append({"name": gname, "series": series})
     if not groups:
-        sys.exit("premium_log.csv 里没有监控清单内的数据")
+        sys.exit("数据库里没有监控清单内的数据")
+
+    reso = "日线·每日收盘溢价" if daily else "5分钟采样"
     payload = {"groups": groups}
     html = CHART_TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False)) \
-                         .replace("__GENERATED__", f"{datetime.now(TZ):%F %H:%M}")
+                         .replace("__GENERATED__", f"{datetime.now(TZ):%F %H:%M} · 范围 {args.range} · {reso}")
     CHART_FILE.write_text(html, encoding="utf-8")
     total = sum(len(s["points"]) for g in groups for s in g["series"])
-    print(f"已生成 {CHART_FILE}（{total} 个数据点）")
+    print(f"已生成 {CHART_FILE}（{args.range} / {reso}，{total} 个数据点，覆盖 {day_count} 个交易日）")
+
+
+def cmd_export(args) -> None:
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM samples ORDER BY time, code").fetchall()
+    conn.close()
+    out = Path(args.out)
+    with out.open("w", encoding="utf-8") as f:
+        f.write(CSV_HEADER + "\n")
+        for r in rows:
+            f.write(",".join(str(x) for x in r) + "\n")
+    print(f"已导出 {len(rows)} 条 -> {out}")
 
 
 # ---------------------------------------------------------------- 表格 / watch
@@ -538,7 +636,12 @@ def main() -> None:
     chk.add_argument("--force", action="store_true", help="忽略交易时段与当日去重")
     sub.add_parser("test-notify", help="向已配置渠道发测试消息")
     sub.add_parser("backfill", help="用 5 分钟K线回填当天溢价数据")
-    sub.add_parser("plot", help="从 premium_log.csv 生成溢价曲线 HTML")
+    plot = sub.add_parser("plot", help="生成溢价曲线 HTML")
+    plot.add_argument("--range", choices=list(RANGE_DAYS), default="all",
+                      help="时间范围（默认 all）")
+    plot.add_argument("--code", help="单基金历史曲线（如 513500，用K线+历史净值，可回溯半年+）")
+    exp = sub.add_parser("export", help="导出数据库为 CSV")
+    exp.add_argument("--out", default=str(BASE / "premium_export.csv"))
     hist = sub.add_parser("history", help="查看日K历史")
     hist.add_argument("code", help="如 sh513100")
     hist.add_argument("--days", type=int, default=20)
@@ -553,7 +656,9 @@ def main() -> None:
     elif args.cmd == "backfill":
         cmd_backfill()
     elif args.cmd == "plot":
-        cmd_plot()
+        cmd_plot_fund(args) if args.code else cmd_plot(args)
+    elif args.cmd == "export":
+        cmd_export(args)
     elif args.watch:
         while True:
             print("\033[2J\033[H", end="")
